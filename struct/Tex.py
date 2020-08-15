@@ -53,7 +53,7 @@ class Tex_Header(PyCStruct):
             "NULL2":[0]*4,
             "NEG0":-1,
             "NEG1":[-1]*8,
-            "NULLX":[-1]*8,
+            "NULLX":[0]*8,
             "Special":1,
             "pixelOffset":0xC0,
             "Flags":(8, 0, 0, 0, 8, 0, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 8, 0, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 8, 0, 8, 0),
@@ -195,13 +195,15 @@ if __name__ in "__main__":
     from pathlib import Path
     from mathutils import Vector
     
-    t = TexFile(r"E:\MHW\chunkG0\vfx\mod\em\em127\md_em127_001\md_127_001_nor_VM.tex")
-    writeDebugNormals(r"E:\MHW\chunkG0\vfx\mod\em\em127\md_em127_001\test.test",t.Data)
-    raise
+    #t = TexFile(r"E:\MHW\chunkG0\vfx\mod\em\em127\md_em127_001\md_127_001_nor_VM.tex")
+    #writeDebugNormals(r"E:\MHW\chunkG0\vfx\mod\em\em127\md_em127_001\test.test",t.Data)
+    #raise
     s = {}
     for p in Path(r"E:\MHW\chunkG0").rglob("*VM.tex"):
         print(p)
         t = TexFile(p)
+        print(t.Header.NULLX)
+        """
         if t.Header.typeData != 7:
             continue
         leniency = 0
@@ -215,6 +217,7 @@ if __name__ in "__main__":
                     raise
                 if p0 != p1:
                     raise ValueError
+        """
     #for k in s:
     #    print(k)
     #    for p in sorted(s[k],key=lambda x: eval(x.split(": ")[1])):
