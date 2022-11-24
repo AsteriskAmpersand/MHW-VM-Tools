@@ -58,7 +58,14 @@ class ClusterSet():
         self.clusters = r
         self.buildReferences()
         return self
-                
+    def strong_intersect(self,clusterset):
+        r = []
+        for c in self:
+            for d in clusterset:
+                r.append(c.intersect(d))
+        self.clusters = r
+        self.clean()
+        return self
     def __contains__(self,key):
         return key in self.internalReferenceTable
     def __getitem__(self,key):

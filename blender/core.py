@@ -24,6 +24,7 @@ from bpy_extras.io_utils import ImportHelper,ExportHelper
 from itertools import groupby
 from operator import itemgetter
 from mathutils import Vector
+import math
 
 from .blenderNormals import vertOrderingToNormalList, getBNormals, setNormals
 from ..common.Clusters import ClusterSet
@@ -184,7 +185,7 @@ class SilvKeys_import_menu(Operator,ImportHelper):
                                  name = "Normal Map Path",
                                  description = "Path to Normal Input. Set to empty for it to mirror the position path.")
     tangent_path = StringProperty(
-                                 name = "Normal Map Path",
+                                 name = "Tangent Map Path",
                                  description = "Path to Tangent Input. Set to empty for it to mirror the position path.")
     
     def invoke(self,context,event):
@@ -204,7 +205,7 @@ class SilvKeys_import_menu(Operator,ImportHelper):
                 nor =  resolveNorTanPath(self.filepath,0)
                 if nor: self.normal_path = nor
             if not self.tangent_path:
-                tan = resolveNorTanPath(self.filepath,0)
+                tan = resolveNorTanPath(self.filepath,1)
                 if tan: self.tangent_path = tan  
         if self.import_all and self.normal_path and self.tangent_path:
             self.importNorTanVM(keyMeshes,TexFile(self.normal_path))
@@ -244,6 +245,12 @@ class SilvKeys_import_menu(Operator,ImportHelper):
         markKey(ob)
         return ob
 
+def vectorDist(lv,rv):
+    return math.sqrt(sum(((l-r)**2 for l,r in zip(lv,rv))))
+
+def matrixDist(LM,RM):
+    return max([vectorDist(lr,rr) for lr,rr in zip(LM,RM)])
+
 class SilvKeys_export_menu(Operator,ExportHelper):
     bl_idname = "custom_export.silv_keys_export_menu"
     bl_label = "Export VM"
@@ -263,6 +270,21 @@ class SilvKeys_export_menu(Operator,ExportHelper):
             description = "Distance tolerancee for vertex welding",
             default = 0.0001
             )
+    aggressive_optimization = BoolProperty(
+            name = "Optimize Packing",
+            description = "Aggresively Optimizes grouping of vertices based on delta similarity.",
+            default = False,
+            )
+    account_normals = BoolProperty(
+            name = "Account for Normals",
+            description = "Account for Normals when Performing Delta Optimization.",
+            default = False,
+            )
+    optimization_tolerance = FloatProperty(
+            name = "Packing Tolerance",
+            description = "Vector distance between deltas to group",
+            default = 0.01,
+            )
     secondary = BoolProperty(
             name = "Use current Secondary UV.",
             description = "Use current Secondary UV instead of gnerating a new one.",
@@ -281,7 +303,7 @@ class SilvKeys_export_menu(Operator,ExportHelper):
                                  name = "Normal Map Path",
                                  description = "Path to Normal Output. Set to empty for it to mirror the position path.")
     tangent_path = StringProperty(
-                                 name = "Normal Map Path",
+                                 name = "Tangent Map Path",
                                  description = "Path to Tangent Output. Set to empty for it to mirror the position path.")
     
     def invoke(self,context,event):
@@ -302,7 +324,7 @@ class SilvKeys_export_menu(Operator,ExportHelper):
                 nor =  resolveNorTanPath(self.filepath,0)
                 if nor: self.normal_path = nor
             if not self.tangent_path:
-                tan = resolveNorTanPath(self.filepath,0)
+                tan = resolveNorTanPath(self.filepath,1)
                 if tan: self.tangent_path = tan  
         nor,tan = self.normal_path,self.tangent_path
         self.exportDeltas(finalDeltas,pos,nor,tan)
@@ -355,6 +377,7 @@ class SilvKeys_export_menu(Operator,ExportHelper):
         return doublemap
     
     def generateVertexOrdering(self,context):
+        #self.aggresive_optimization = False
         scn = context.scene
         basis = scn.mhw_silv_keys[0].mesh
         if self.secondary:
@@ -362,6 +385,8 @@ class SilvKeys_export_menu(Operator,ExportHelper):
         else:
             if self.weld:
                 doublemap = self.removeDoublesOrdering(basis,scn.mhw_silv_keys[1:])
+            elif self.aggressive_optimization:
+                doublemap = self.violentOptimizeOrdering(scn.mhw_silv_keys) 
             else:
                 doublemap = {}
             vertOrdering = self.orderingFromDoubleMap(basis,doublemap)        
@@ -375,6 +400,56 @@ class SilvKeys_export_menu(Operator,ExportHelper):
         doublemap.clean()
         return doublemap
     
+    def generateDeltaCluster(self,deltas,rowIx):
+        clustering = ClusterSet()
+        for ix,vert in enumerate(deltas):
+            clustering.new(ix,vert[rowIx])
+        clustering.reduce(self.optimization_tolerance)
+        return clustering
+    
+    
+    def optimizeDeltaNors(self,keys):
+        nors = [ [] for vert in keys[0].mesh.data.vertices ]
+        for mdv in keys:
+            mesh = mdv.mesh.data.vertices
+            for nor,vert in zip(nors,mesh):
+                nor.append(vert.normal.normalized())
+        base = self.generateDeltaCluster(nors,0)
+        #print(base.internalReferenceTable.keys())
+        for i in range(1,len(keys)):
+            cluster = self.generateDeltaCluster(nors,i)
+            #print(cluster.internalReferenceTable.keys())
+            base.intersect(cluster)
+            base.clean()
+            print("Normals Pass #%d: %d"%(i,len(base)))        
+        return base
+    
+    def optimizeDeltaVerts(self,keys):
+        verts = [ [] for vert in keys[0].mesh.data.vertices ]
+        for l,r in zip(keys[:-1],keys[1:]):
+            for arr,v0,v1 in zip(verts,l.mesh.data.vertices,r.mesh.data.vertices):
+                arr.append(v1.co - v0.co)
+                
+        base = self.generateDeltaCluster(verts,0) 
+        #print(base.internalReferenceTable.keys())
+        for key in range(1,len(keys)-1):            
+            print("Pass #%d: %d"%(key-1,len(base)))
+            keyClustering = self.generateDeltaCluster(verts,key)
+            #print(keyClustering.internalReferenceTable.keys())
+            base.intersect(keyClustering)
+            base.clean()   
+        print("Pass #%d: %d"%(key,len(base)))        
+        return base
+    
+    def violentOptimizeOrdering(self,keys):
+        print("Exporting VM in Optimized Mode")
+        base = self.optimizeDeltaVerts(keys)
+        if self.account_normals:
+            norbase = self.optimizeDeltaNors(keys)
+        base.strong_intersect(norbase)
+        base.clean()
+        return base
+
     def orderingFromDoubleMap(self,basis,doublemap):
         autonumbering = 0
         reUV = []
@@ -389,8 +464,7 @@ class SilvKeys_export_menu(Operator,ExportHelper):
                     autonumbering += 1
             else:
                 reUV.append(autonumbering)
-                autonumbering += 1
-                
+                autonumbering += 1                
         createVertexOrderingUV(basis,reUV)
         return getVertexOrderingList(basis)
     
@@ -442,6 +516,21 @@ class SilvKeys_export(SilvKeys_export_menu):
             description = "Distance tolerancee for vertex welding",
             default = 0.0001
             )
+    aggressive_optimization = BoolProperty(
+            name = "Optimize Packing",
+            description = "Aggresively Optimizes grouping of vertices based on delta similarity.",
+            default = False,
+            )
+    account_normals = BoolProperty(
+            name = "Account for Normals",
+            description = "Account for Normals when Performing Delta Optimization.",
+            default = False,
+            )
+    optimization_tolerance = FloatProperty(
+            name = "Packing Tolerance",
+            description = "Vector distance between deltas to group",
+            default = 0.01,
+            )    
     secondary = BoolProperty(
             name = "Use current Secondary UV.",
             description = "Use current Secondary UV instead of gnerating a new one.",
