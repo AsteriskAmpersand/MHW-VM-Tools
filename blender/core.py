@@ -45,15 +45,20 @@ class UVCountMismatch(Exception):
     pass
 class VertexCountMismatch(Exception):
     pass
+class NoMeshSelected(Exception):
+    pass
+
+def elementWiseMult(v1,v2):
+    Vector((l*r for l,r in zip(v1,v2)))
 
 def getVertexOrderingListForceful(mesh):
     """Creates a list of bins for each vertex uv index grouping"""
     if len(mesh.data.uv_layers) < 2:
-        raise MissingSecondary()    
+        raise MissingSecondary()
     bm = bmesh.new()
     bm.from_mesh(mesh.data)
     bm.verts.ensure_lookup_table()
-    bm.verts.index_update() 
+    bm.verts.index_update()
     layer = bm.loops.layers.uv[1]
     uvmap = {}
     for face in bm.faces:
@@ -70,11 +75,11 @@ def getVertexOrderingListForceful(mesh):
 def getVertexOrderingList(mesh):
     """Creates a list of bins for each vertex uv index grouping"""
     if len(mesh.data.uv_layers) < 2:
-        raise MissingSecondary()    
+        raise MissingSecondary()
     bm = bmesh.new()
     bm.from_mesh(mesh.data)
     bm.verts.ensure_lookup_table()
-    bm.verts.index_update() 
+    bm.verts.index_update()
     layer = bm.loops.layers.uv[1]
     uvmap = {}
     visited = {}
@@ -101,7 +106,7 @@ def createVertexOrderingUV(mesh,vertIndex):
     bm = bmesh.new()
     bm.from_mesh(mesh.data)
     bm.verts.ensure_lookup_table()
-    bm.verts.index_update() 
+    bm.verts.index_update()
     layer = bm.loops.layers.uv.new()
     for face in bm.faces:
         for v in face.loops:
@@ -127,20 +132,24 @@ def addShapekey(obj, vertOrd, vmKey = None):
     bm.to_mesh(obj.data)
     return sk
 
-def applyPosSilvKey(mesh,vertOrdering,posKey):
+def applyPosSilvKey(mesh,vertOrdering,posKey,mirror):
     bm = bmesh.new()
     bm.from_mesh(mesh.data)
     bm.verts.ensure_lookup_table()
-    bm.verts.index_update() 
+    bm.verts.index_update()
     for vixs,delta in zip(vertOrdering,posKey):
         for vix in vixs:
-            bm.verts[vix].co += Vector([delta.x,delta.y,delta.z])
+            bm.verts[vix].co += Vector([delta.x*mirror.x,
+                                        delta.y*mirror.y,
+                                        delta.z*mirror.z])
     bm.to_mesh(mesh.data)
 
-def applyNorSilvKey(keyM,vertOrder,key):
+def applyNorSilvKey(keyM,vertOrder,key,mirror):
     normals = vertOrderingToNormalList(vertOrder,key)
-    setNormals(keyM,normals)
-    
+    setNormals(keyM,[Vector((n.x*mirror.x,
+                             n.y*mirror.y,
+                             n.z*mirror.z)) for n in normals])
+
 def compilePosDelta(meshes):
     key = meshes[0].data
     deltas = []
@@ -162,7 +171,7 @@ def compileNorTanDelta(meshes):
 
 def reorderDelta(vertOrdering,delta):
     return [delta[next(iter(order))] if order else Vector(0,0,0) for order in vertOrdering]
-    
+
 # =============================================================================
 #  Operators
 # =============================================================================
@@ -172,11 +181,26 @@ class SilvKeys_import_menu(Operator,ImportHelper):
     bl_label = "Import VM"
     bl_description = "Imports VMs as SilvKeys"
     bl_options = {'REGISTER', 'PRESET','UNDO'}
-    
+
 
     filename_ext = ".tex"
     filter_glob = StringProperty(default="*.tex", options={'HIDDEN'}, maxlen=255)
-    
+    mirror = BoolProperty(name = "Mirror Axis",
+                              description = "Select Mirrored Axes.",
+                              default = False,
+                              )
+    mirror_x = BoolProperty(name = "Mirror X-Axis",
+                              description = "Mirror Deformation on the X-Axis.",
+                              default = False,
+                              )
+    mirror_y = BoolProperty(name = "Mirror Y-Axis",
+                              description = "Mirror Deformation on the Y-Axis.",
+                              default = False,
+                              )
+    mirror_z = BoolProperty(name = "Mirror Z-Axis",
+                              description = "Mirror Deformation on the Z-Axis.",
+                              default = False,
+                              )
     import_all = BoolProperty(name = "Import Normals and Tangents",
                               description = "Imports matching Normal and Tangent VM.",
                               default = True,
@@ -187,31 +211,53 @@ class SilvKeys_import_menu(Operator,ImportHelper):
     tangent_path = StringProperty(
                                  name = "Tangent Map Path",
                                  description = "Path to Tangent Input. Set to empty for it to mirror the position path.")
-    
+
+    def draw(self, context):
+        layout = self.layout
+        layout.prop(self, "mirror")
+        if self.mirror:
+            box = layout.box()
+            box.prop(self, "mirror_x")
+            box.prop(self, "mirror_y")
+            box.prop(self, "mirror_z")
+        layout.prop(self, "import_all")
+        layout.prop(self, "normal_path")
+        layout.prop(self, "tangent_path")
+
     def invoke(self,context,event):
         if context.scene.mhw_silv_key_pos:
             self.filepath = context.scene.mhw_silv_key_pos
         self.normal_path = context.scene.mhw_silv_key_nor
         self.tangent_path = context.scene.mhw_silv_key_tan
         return super().invoke(context,event)
-    
+
     def execute(self,context):
+        mirror = self.buildMirror()
         if context.scene.mhw_silv_keys:
             raise SilvKeysAlreadyPresent("Clear current SilvKeys before importing.")
         baseObj = context.object
-        keyMeshes = self.importPosVM(context,baseObj,TexFile(self.filepath))
+        if baseObj is None:
+            raise NoMeshSelected("Select a mesh to apply the SilvKeys to.")
+        keyMeshes = self.importPosVM(context,baseObj,TexFile(self.filepath),mirror)
         if self.import_all:
             if not self.normal_path:
                 nor =  resolveNorTanPath(self.filepath,0)
                 if nor: self.normal_path = nor
             if not self.tangent_path:
                 tan = resolveNorTanPath(self.filepath,1)
-                if tan: self.tangent_path = tan  
+                if tan: self.tangent_path = tan
         if self.import_all and self.normal_path and self.tangent_path:
-            self.importNorTanVM(keyMeshes,TexFile(self.normal_path))
+            self.importNorTanVM(keyMeshes,TexFile(self.normal_path),mirror)
         return {'FINISHED'}
 
-    def importPosVM(self,context,baseObj,silvKeysets):
+    def buildMirror(self):
+        polarize = lambda x: -1 if x else 1
+        if self.mirror:
+            return Vector(map(polarize,(self.mirror_x,self.mirror_y,self.mirror_z)))
+        else:
+            return Vector((1,1,1))
+
+    def importPosVM(self,context,baseObj,silvKeysets,mirror):
         self.appendKey(context,baseObj)
         keyMeshes = []
         for key in silvKeysets:
@@ -221,20 +267,20 @@ class SilvKeys_import_menu(Operator,ImportHelper):
                 print("Warning Vector Map has %d UV Entries while Mesh has %d"%(len(key),len(vertOrder)))
             if len(vertOrder) < len(key):
                 print("Warning Mesh has %d UV Entries while Mesh has %d"%(len(vertOrder),len(key)))
-            applyPosSilvKey(keyM,vertOrder,key)
+            applyPosSilvKey(keyM,vertOrder,key,mirror)
             self.appendKey(context,keyM)
             keyMeshes.append(keyM)
         return keyMeshes
-            
-    def importNorTanVM(self,meshes,norKeys):
+
+    def importNorTanVM(self,meshes,norKeys,mirror):
         for keyM,key in zip(meshes,norKeys):
             vertOrder = getVertexOrderingList(keyM)
-            applyNorSilvKey(keyM,vertOrder,key)
-    
+            applyNorSilvKey(keyM,vertOrder,key,mirror)
+
     def appendKey(self,context,mesh):
         scn = context.scene
         addMeshAsSilvKey(scn,mesh)
-        
+
     def createKeyMesh(self,scn,baseObj):
         me = baseObj.data
         n_me = me.copy()
@@ -305,16 +351,16 @@ class SilvKeys_export_menu(Operator,ExportHelper):
     tangent_path = StringProperty(
                                  name = "Tangent Map Path",
                                  description = "Path to Tangent Output. Set to empty for it to mirror the position path.")
-    
+
     def invoke(self,context,event):
         if context.scene.mhw_silv_key_pos:
-            self.filepath = context.scene.mhw_silv_key_pos            
+            self.filepath = context.scene.mhw_silv_key_pos
         self.normal_path = context.scene.mhw_silv_key_nor
         self.tangent_path = context.scene.mhw_silv_key_tan
         return super().invoke(context,event)
 
     def execute(self,context):
-        self.sanityCheck(context)        
+        self.sanityCheck(context)
         vertOrdering = self.generateVertexOrdering(context)
         deltas = self.compileDeltas(context,self.export_all)
         finalDeltas = self.summarizeDeltas(vertOrdering,deltas)
@@ -325,7 +371,7 @@ class SilvKeys_export_menu(Operator,ExportHelper):
                 if nor: self.normal_path = nor
             if not self.tangent_path:
                 tan = resolveNorTanPath(self.filepath,1)
-                if tan: self.tangent_path = tan  
+                if tan: self.tangent_path = tan
         nor,tan = self.normal_path,self.tangent_path
         self.exportDeltas(finalDeltas,pos,nor,tan)
         return {'FINISHED'}
@@ -337,7 +383,7 @@ class SilvKeys_export_menu(Operator,ExportHelper):
         for mesh in scn.mhw_silv_keys[1:]:
             if l != len(mesh.mesh.data.vertices):
                 raise VertexCountMismatch("SilvKeys have different vertex count to basis.")
-        
+
     def compileDeltas(self,context,exportTanSpace):
         deltas = []
         meshes = [k.mesh for k in context.scene.mhw_silv_keys]
@@ -348,22 +394,22 @@ class SilvKeys_export_menu(Operator,ExportHelper):
             deltas.append(norDeltas)
             deltas.append(tanDeltas)
         return deltas
-    
+
     def exportDeltas(self,deltas,pos,nor,tan):
         for d,m,op in zip(deltas,
                           [pos,nor,tan],
                           [self.exportPosDelta,self.exportNorTanDelta,self.exportNorTanDelta]):
-            op(d,m)            
-    
+            op(d,m)
+
     def exportPosDelta(self,deltas,outf):
         TexFile().construct(deltas, "Full_Pos_VM" if self.fullfloat else "Pos_VM").write(outf)
-        
+
     def exportNorTanDelta(self,deltas,outf):
         TexFile().construct(deltas,"NorTan_VM").write(outf)
-    
+
     def summarizeDeltas(self,vertOrdering,deltas):
         return list(map(lambda f: list(map(lambda x: reorderDelta(vertOrdering,x),f)),deltas))
-    
+
     def getDoublesCluster(self,basis):
         clustering = ClusterSet()
         for ix,vert in enumerate(basis.vertices):
@@ -375,7 +421,7 @@ class SilvKeys_export_menu(Operator,ExportHelper):
         clustering = self.getDoublesCluster(keym)
         doublemap.intersect(clustering)
         return doublemap
-    
+
     def generateVertexOrdering(self,context):
         #self.aggresive_optimization = False
         scn = context.scene
@@ -386,11 +432,11 @@ class SilvKeys_export_menu(Operator,ExportHelper):
             if self.weld:
                 doublemap = self.removeDoublesOrdering(basis,scn.mhw_silv_keys[1:])
             elif self.aggressive_optimization:
-                doublemap = self.violentOptimizeOrdering(scn.mhw_silv_keys) 
+                doublemap = self.violentOptimizeOrdering(scn.mhw_silv_keys)
             else:
                 doublemap = {}
-            vertOrdering = self.orderingFromDoubleMap(basis,doublemap)        
-        return vertOrdering                  
+            vertOrdering = self.orderingFromDoubleMap(basis,doublemap)
+        return vertOrdering
 
     def removeDoublesOrdering(self,basis,keys):
         doublemap = self.getDoublesCluster(basis.data)
@@ -399,15 +445,15 @@ class SilvKeys_export_menu(Operator,ExportHelper):
             doublemap = self.updateMeshDoubles(keymesh,doublemap)
         doublemap.clean()
         return doublemap
-    
+
     def generateDeltaCluster(self,deltas,rowIx):
         clustering = ClusterSet()
         for ix,vert in enumerate(deltas):
             clustering.new(ix,vert[rowIx])
         clustering.reduce(self.optimization_tolerance)
         return clustering
-    
-    
+
+
     def optimizeDeltaNors(self,keys):
         nors = [ [] for vert in keys[0].mesh.data.vertices ]
         for mdv in keys:
@@ -421,26 +467,26 @@ class SilvKeys_export_menu(Operator,ExportHelper):
             #print(cluster.internalReferenceTable.keys())
             base.intersect(cluster)
             base.clean()
-            print("Normals Pass #%d: %d"%(i,len(base)))        
+            print("Normals Pass #%d: %d"%(i,len(base)))
         return base
-    
+
     def optimizeDeltaVerts(self,keys):
         verts = [ [] for vert in keys[0].mesh.data.vertices ]
         for l,r in zip(keys[:-1],keys[1:]):
             for arr,v0,v1 in zip(verts,l.mesh.data.vertices,r.mesh.data.vertices):
                 arr.append(v1.co - v0.co)
-                
-        base = self.generateDeltaCluster(verts,0) 
+
+        base = self.generateDeltaCluster(verts,0)
         #print(base.internalReferenceTable.keys())
-        for key in range(1,len(keys)-1):            
+        for key in range(1,len(keys)-1):
             print("Pass #%d: %d"%(key-1,len(base)))
             keyClustering = self.generateDeltaCluster(verts,key)
             #print(keyClustering.internalReferenceTable.keys())
             base.intersect(keyClustering)
-            base.clean()   
-        print("Pass #%d: %d"%(key,len(base)))        
+            base.clean()
+        print("Pass #%d: %d"%(key,len(base)))
         return base
-    
+
     def violentOptimizeOrdering(self,keys):
         print("Exporting VM in Optimized Mode")
         base = self.optimizeDeltaVerts(keys)
@@ -459,15 +505,15 @@ class SilvKeys_export_menu(Operator,ExportHelper):
                 if doublemap[ix].id in usedGroups:
                     reUV.append(usedGroups[doublemap[ix].id])
                 else:
-                    reUV.append(autonumbering)                    
+                    reUV.append(autonumbering)
                     usedGroups[doublemap[ix].id]=autonumbering
                     autonumbering += 1
             else:
                 reUV.append(autonumbering)
-                autonumbering += 1                
+                autonumbering += 1
         createVertexOrderingUV(basis,reUV)
         return getVertexOrderingList(basis)
-    
+
 # =============================================================================
 # Non Menu Access
 # =============================================================================
@@ -477,7 +523,7 @@ class SilvKeys_import(SilvKeys_import_menu):
     bl_label = "Import VM"
     bl_description = "Imports VMs as SilvKeys"
     bl_options = {'REGISTER', 'UNDO'}
-    
+
     import_all = BoolProperty(default = False,
                               name = "Import Normals and Tangents",
                               description = "Imports matching Normal and Tangent VM.",
@@ -485,22 +531,23 @@ class SilvKeys_import(SilvKeys_import_menu):
                               )
 
     def invoke(self,context,event):
-        self.filepath = context.scene.mhw_silv_key_pos            
+        self.filepath = context.scene.mhw_silv_key_pos
         self.normal_path = context.scene.mhw_silv_key_nor
         self.tangent_path = context.scene.mhw_silv_key_tan
+        self.mirror = False
         return self.execute(context)
 
     @classmethod
     def poll(self,context):
         return context.object and context.object.type == "MESH" and len(context.object.data.uv_layers) > 1 and context.scene.mhw_silv_key_pos
-    
+
 class SilvKeys_export(SilvKeys_export_menu):
     bl_idname = "scene.silv_keys_export"
     bl_label = "Export VM (*VM.tex)"
     bl_description = "Exports VMs as SilvKeys"
     bl_options = {'REGISTER'}
 
-    
+
     export_all = BoolProperty(default = False,
                               name = "Export Normals and Tangents",
                               description = "Produces matching Normal and Tangent VM.",
@@ -530,7 +577,7 @@ class SilvKeys_export(SilvKeys_export_menu):
             name = "Packing Tolerance",
             description = "Vector distance between deltas to group",
             default = 0.01,
-            )    
+            )
     secondary = BoolProperty(
             name = "Use current Secondary UV.",
             description = "Use current Secondary UV instead of gnerating a new one.",
@@ -545,17 +592,17 @@ class SilvKeys_export(SilvKeys_export_menu):
                               name = "Export Normals and Tangents",
                               description = "Produces matching Normal and Tangent VM.",
                               )
-    
+
     def invoke(self,context,event):
-        self.filepath = context.scene.mhw_silv_key_pos            
+        self.filepath = context.scene.mhw_silv_key_pos
         self.normal_path = context.scene.mhw_silv_key_nor
         self.tangent_path = context.scene.mhw_silv_key_tan
         return self.execute(context)
-    
+
     @classmethod
     def poll(self,context):
         return len(context.scene.mhw_silv_keys) > 1
-        
+
 def menu_func_import(self, context):
     self.layout.operator(SilvKeys_import_menu.bl_idname, text="MHW VM (VM.tex)")
 def menu_func_export(self, context):
